@@ -490,6 +490,27 @@ if ($UseLegacyInstaller) {
         Move-Item -Path "$ScratchDisk\tiny11\sources\install.wim" -Destination "$ScratchDisk\tiny11\sources\$architecture\install.wim" -Force
     }
     
+    # Preserve drivers for legacy installer
+    Write-Output "Preserving drivers for legacy installer..."
+    
+    # Copy the drivers folder to the architecture-specific folder
+    if (Test-Path -Path "$ScratchDisk\tiny11\sources\drivers") {
+        if (-not (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\drivers")) {
+            New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture\drivers" | Out-Null
+        }
+        Copy-Item -Path "$ScratchDisk\tiny11\sources\drivers\*" -Destination "$ScratchDisk\tiny11\sources\$architecture\drivers\" -Recurse -Force
+        Write-Output "Drivers successfully copied to architecture-specific folder."
+    }
+    
+    # Preserve DriverStore if it exists (contains SATA drivers)
+    if (Test-Path -Path "$ScratchDisk\tiny11\sources\DriverStore") {
+        if (-not (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\DriverStore")) {
+            New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture\DriverStore" | Out-Null
+        }
+        Copy-Item -Path "$ScratchDisk\tiny11\sources\DriverStore\*" -Destination "$ScratchDisk\tiny11\sources\$architecture\DriverStore\" -Recurse -Force
+        Write-Output "DriverStore successfully copied to architecture-specific folder."
+    }
+    
     # Create metadata files needed for legacy installer
     Write-Output "Creating metadata files for legacy installer..."
     
@@ -513,7 +534,29 @@ Architecture=$architecture
 "@
     Set-Content -Path "$ScratchDisk\tiny11\sources\product.ini" -Value $productIniContent
     
-    Write-Output "Legacy installer configuration completed."
+    # Special handling for other potential driver-related folders
+    $driverRelatedFolders = @("inf", "pnputil", "sata")
+    foreach ($folder in $driverRelatedFolders) {
+        if (Test-Path -Path "$ScratchDisk\tiny11\sources\$folder") {
+            if (-not (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\$folder")) {
+                New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture\$folder" | Out-Null
+            }
+            Copy-Item -Path "$ScratchDisk\tiny11\sources\$folder\*" -Destination "$ScratchDisk\tiny11\sources\$architecture\$folder\" -Recurse -Force
+            Write-Output "$folder folder successfully copied to architecture-specific folder."
+        }
+    }
+    
+    # Also preserve any .inf and .cat files in the sources directory (often contain driver info)
+    $driverFiles = Get-ChildItem -Path "$ScratchDisk\tiny11\sources\" -Filter "*.inf" -File
+    foreach ($file in $driverFiles) {
+        Copy-Item -Path $file.FullName -Destination "$ScratchDisk\tiny11\sources\$architecture\" -Force
+    }
+    $catFiles = Get-ChildItem -Path "$ScratchDisk\tiny11\sources\" -Filter "*.cat" -File
+    foreach ($file in $catFiles) {
+        Copy-Item -Path $file.FullName -Destination "$ScratchDisk\tiny11\sources\$architecture\" -Force
+    }
+    
+    Write-Output "Legacy installer configuration completed with driver preservation."
 }
 
 Write-Output "Creating ISO image..."
