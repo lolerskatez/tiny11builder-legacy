@@ -13,14 +13,19 @@
 .PARAMETER SCRATCH
     Drive letter of the desired scratch disk (eg: D)
 
+.PARAMETER Legacy
+    Switch parameter to use legacy installer format instead of the modern installer.
+    If this parameter is not provided, the script will prompt you to choose interactively.
+
 .EXAMPLE
     .\tiny11maker.ps1 E D
     .\tiny11maker.ps1 -ISO E -SCRATCH D
-    .\tiny11maker.ps1 -SCRATCH D -ISO E
-    .\tiny11maker.ps1
+    .\tiny11maker.ps1 -SCRATCH D -ISO E -Legacy
+    .\tiny11maker.ps1 -Legacy
 
     *If you ordinal parameters the first one must be the mounted iso. The second is the scratch drive.
     prefer the use of full named parameter (eg: "-ISO") as you can put in the order you want.
+    Use -Legacy to create an ISO with the legacy installer format, or select interactively during script execution.
 
 .NOTES
     Auteur: ntdevlabs
@@ -30,7 +35,8 @@
 #---------[ Parameters ]---------#
 param (
     [ValidatePattern('^[c-zC-Z]$')][string]$ISO,
-    [ValidatePattern('^[c-zC-Z]$')][string]$SCRATCH
+    [ValidatePattern('^[c-zC-Z]$')][string]$SCRATCH,
+    [switch]$Legacy
 )
 
 if (-not $SCRATCH) {
@@ -38,6 +44,9 @@ if (-not $SCRATCH) {
 } else {
     $ScratchDisk = $SCRATCH + ":"
 }
+
+# We'll set $UseLegacyInstaller interactively later, but initialize with parameter value
+$UseLegacyInstaller = $Legacy.IsPresent
 
 #---------[ Functions ]---------#
 function Set-RegistryValue {
@@ -106,6 +115,11 @@ Start-Transcript -Path "$PSScriptRoot\tiny11_$(get-date -f yyyyMMdd_HHmms).log"
 $Host.UI.RawUI.WindowTitle = "Tiny11 image creator"
 Clear-Host
 Write-Output "Welcome to the tiny11 image creator! Release: 09-07-25"
+if ($Legacy.IsPresent) {
+    Write-Output "LEGACY INSTALLER MODE ENABLED: Creating ISO with legacy installer format"
+} else {
+    Write-Output "You will be able to choose between modern and legacy installer formats after selecting Windows version"
+}
 
 $hostArchitecture = $Env:PROCESSOR_ARCHITECTURE
 New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources" | Out-Null
@@ -151,6 +165,28 @@ while ($ImagesIndex -notcontains $index) {
     Get-WindowsImage -ImagePath $ScratchDisk\tiny11\sources\install.wim
     $index = Read-Host "Please enter the image index"
 }
+
+# Interactive installer type selection
+if (-not $Legacy.IsPresent) {
+    Write-Output "`nSelect installer type:"
+    Write-Output "1. New installer (Windows 11 modern installer)"
+    Write-Output "2. Legacy installer (Windows 10-style installer)"
+    $installerSelection = ""
+    while ($installerSelection -notmatch '^[1-2]$') {
+        $installerSelection = Read-Host "Please enter your choice (1 or 2)"
+        if ($installerSelection -notmatch '^[1-2]$') {
+            Write-Output "Invalid selection. Please enter 1 or 2."
+        }
+    }
+    $UseLegacyInstaller = ($installerSelection -eq "2")
+    
+    if ($UseLegacyInstaller) {
+        Write-Output "`nLegacy installer selected. Will create ISO with Windows 10-style installer.`n"
+    } else {
+        Write-Output "`nNew installer selected. Will create ISO with Windows 11 modern installer.`n"
+    }
+}
+
 Write-Output "Mounting Windows image. This may take a while."
 $wimFilePath = "$ScratchDisk\tiny11\sources\install.wim"
 & takeown "/F" $wimFilePath
@@ -438,6 +474,48 @@ Clear-Host
 Write-Output "The tiny11 image is now completed. Proceeding with the making of the ISO..."
 Write-Output "Copying unattended file for bypassing MS account on OOBE..."
 Copy-Item -Path "$PSScriptRoot\autounattend.xml" -Destination "$ScratchDisk\tiny11\autounattend.xml" -Force | Out-Null
+
+# Handle legacy installer configuration if selected
+if ($UseLegacyInstaller) {
+    Write-Output "Setting up legacy installer configuration..."
+    
+    # Create legacy installer directories and files if they don't exist
+    if (-not (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture")) {
+        New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture" | Out-Null
+    }
+    
+    # Move install.wim to architecture-specific folder for legacy installer
+    if (Test-Path -Path "$ScratchDisk\tiny11\sources\install.wim") {
+        Write-Output "Moving install.wim to architecture-specific folder for legacy installer..."
+        Move-Item -Path "$ScratchDisk\tiny11\sources\install.wim" -Destination "$ScratchDisk\tiny11\sources\$architecture\install.wim" -Force
+    }
+    
+    # Create metadata files needed for legacy installer
+    Write-Output "Creating metadata files for legacy installer..."
+    
+    # Create metadata_info.xml file
+    $metadataInfoContent = @"
+<metadata>
+  <installer>
+    <selection architecture="$architecture" />
+  </installer>
+</metadata>
+"@
+    Set-Content -Path "$ScratchDisk\tiny11\sources\metadata_info.xml" -Value $metadataInfoContent
+    
+    # Create product.ini file with appropriate settings
+    $productIniContent = @"
+[Product]
+Name=Windows
+Version=11
+BuildID=$(Get-Date -Format "yyyyMMdd")
+Architecture=$architecture
+"@
+    Set-Content -Path "$ScratchDisk\tiny11\sources\product.ini" -Value $productIniContent
+    
+    Write-Output "Legacy installer configuration completed."
+}
+
 Write-Output "Creating ISO image..."
 $ADKDepTools = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\$hostarchitecture\Oscdimg"
 $localOSCDIMGPath = "$PSScriptRoot\oscdimg.exe"
@@ -466,10 +544,18 @@ if ([System.IO.Directory]::Exists($ADKDepTools)) {
     $OSCDIMG = $localOSCDIMGPath
 }
 
-& "$OSCDIMG" '-m' '-o' '-u2' '-udfver102' "-bootdata:2#p0,e,b$ScratchDisk\tiny11\boot\etfsboot.com#pEF,e,b$ScratchDisk\tiny11\efi\microsoft\boot\efisys.bin" "$ScratchDisk\tiny11" "$PSScriptRoot\tiny11.iso"
+# Set appropriate ISO filename based on installer type
+$isoFileName = if ($UseLegacyInstaller) { "tiny11_legacy.iso" } else { "tiny11.iso" }
+
+& "$OSCDIMG" '-m' '-o' '-u2' '-udfver102' "-bootdata:2#p0,e,b$ScratchDisk\tiny11\boot\etfsboot.com#pEF,e,b$ScratchDisk\tiny11\efi\microsoft\boot\efisys.bin" "$ScratchDisk\tiny11" "$PSScriptRoot\$isoFileName"
 
 # Finishing up
 Write-Output "Creation completed! Press any key to exit the script..."
+if ($UseLegacyInstaller) {
+    Write-Output "Legacy ISO created as tiny11_legacy.iso"
+} else {
+    Write-Output "Standard ISO created as tiny11.iso"
+}
 Read-Host "Press Enter to continue"
 Write-Output "Performing Cleanup..."
 Remove-Item -Path "$ScratchDisk\tiny11" -Recurse -Force | Out-Null
