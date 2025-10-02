@@ -125,7 +125,7 @@ You can select your preferred installer type either:
 - You might have to update Winget before being able to install any apps, using Microsoft Store.
 - Outlook and Dev Home might reappear after some time. This is an ongoing battle, though the latest script update tries to prevent this more aggressively.
 - If you are using this script on arm64, you might see a glimpse of an error while running the script. This is caused by the fact that the arm64 image doesn't have OneDriveSetup.exe included in the System32 folder.
-- ~~In legacy installer mode, drivers may be missing requiring manual loading of SATA and other drivers~~ (Fixed in the 10-02-25 update - drivers are now preserved in legacy installer mode)
+- ~~In legacy installer mode, drivers may be missing requiring manual loading of SATA and other drivers~~ (Fixed in the 10-02-25 update - comprehensive driver preservation has been implemented for the legacy installer)
 
 ---
 

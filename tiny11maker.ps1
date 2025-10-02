@@ -484,42 +484,77 @@ if ($UseLegacyInstaller) {
         New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture" | Out-Null
     }
     
-    # Move install.wim to architecture-specific folder for legacy installer
+    # IMPORTANT: For legacy installer, we need to COPY (not move) install.wim to architecture-specific folder
     if (Test-Path -Path "$ScratchDisk\tiny11\sources\install.wim") {
-        Write-Output "Moving install.wim to architecture-specific folder for legacy installer..."
-        Move-Item -Path "$ScratchDisk\tiny11\sources\install.wim" -Destination "$ScratchDisk\tiny11\sources\$architecture\install.wim" -Force
+        Write-Output "Copying install.wim to architecture-specific folder for legacy installer..."
+        Copy-Item -Path "$ScratchDisk\tiny11\sources\install.wim" -Destination "$ScratchDisk\tiny11\sources\$architecture\install.wim" -Force
     }
     
-    # Preserve drivers for legacy installer
-    Write-Output "Preserving drivers for legacy installer..."
+    Write-Output "Setting up comprehensive driver preservation for legacy installer..."
     
-    # Copy the drivers folder to the architecture-specific folder
-    if (Test-Path -Path "$ScratchDisk\tiny11\sources\drivers") {
-        if (-not (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\drivers")) {
-            New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture\drivers" | Out-Null
+    # ===== PHASE 1: Create all necessary directories =====
+    $driverDirectories = @(
+        "$ScratchDisk\tiny11\sources\$architecture\drivers",
+        "$ScratchDisk\tiny11\sources\$architecture\DriverStore",
+        "$ScratchDisk\tiny11\sources\$architecture\inf",
+        "$ScratchDisk\tiny11\sources\$architecture\pnputil",
+        "$ScratchDisk\tiny11\sources\$architecture\sata",
+        "$ScratchDisk\tiny11\sources\$architecture\FileRepository"
+    )
+    
+    foreach ($dir in $driverDirectories) {
+        if (-not (Test-Path -Path $dir)) {
+            Write-Output "Creating directory: $dir"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
         }
-        Copy-Item -Path "$ScratchDisk\tiny11\sources\drivers\*" -Destination "$ScratchDisk\tiny11\sources\$architecture\drivers\" -Recurse -Force
-        Write-Output "Drivers successfully copied to architecture-specific folder."
     }
     
-    # Preserve DriverStore if it exists (contains SATA drivers)
-    if (Test-Path -Path "$ScratchDisk\tiny11\sources\DriverStore") {
-        if (-not (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\DriverStore")) {
-            New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture\DriverStore" | Out-Null
+    # ===== PHASE 2: Copy all driver files and maintain both original and architecture-specific locations =====
+    
+    # Process standard driver directories
+    $driverSources = @(
+        @{Source = "$ScratchDisk\tiny11\sources\drivers"; Dest = "$ScratchDisk\tiny11\sources\$architecture\drivers"},
+        @{Source = "$ScratchDisk\tiny11\sources\DriverStore"; Dest = "$ScratchDisk\tiny11\sources\$architecture\DriverStore"},
+        @{Source = "$ScratchDisk\tiny11\sources\inf"; Dest = "$ScratchDisk\tiny11\sources\$architecture\inf"},
+        @{Source = "$ScratchDisk\tiny11\sources\pnputil"; Dest = "$ScratchDisk\tiny11\sources\$architecture\pnputil"},
+        @{Source = "$ScratchDisk\tiny11\sources\sata"; Dest = "$ScratchDisk\tiny11\sources\$architecture\sata"},
+        @{Source = "$ScratchDisk\tiny11\sources\FileRepository"; Dest = "$ScratchDisk\tiny11\sources\$architecture\FileRepository"}
+    )
+    
+    foreach ($dirPair in $driverSources) {
+        if (Test-Path -Path $dirPair.Source) {
+            Write-Output "Copying from $($dirPair.Source) to $($dirPair.Dest)"
+            Copy-Item -Path "$($dirPair.Source)\*" -Destination $dirPair.Dest -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Output "Source directory not found: $($dirPair.Source)"
         }
-        Copy-Item -Path "$ScratchDisk\tiny11\sources\DriverStore\*" -Destination "$ScratchDisk\tiny11\sources\$architecture\DriverStore\" -Recurse -Force
-        Write-Output "DriverStore successfully copied to architecture-specific folder."
     }
+    
+    # ===== PHASE 3: Special handling for driver files in sources directory =====
+    $driverFileExtensions = @("*.inf", "*.cat", "*.sys", "*.dll", "*.ini")
+    
+    foreach ($ext in $driverFileExtensions) {
+        $files = Get-ChildItem -Path "$ScratchDisk\tiny11\sources\" -Filter $ext -File -ErrorAction SilentlyContinue
+        if ($files) {
+            Write-Output "Copying $ext files to architecture-specific folder..."
+            foreach ($file in $files) {
+                Copy-Item -Path $file.FullName -Destination "$ScratchDisk\tiny11\sources\$architecture\" -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    
+    # ===== PHASE 4: Create special driver index files for legacy installer =====
+    Write-Output "Creating driver index files for legacy installer..."
     
     # Create metadata files needed for legacy installer
-    Write-Output "Creating metadata files for legacy installer..."
-    
-    # Create metadata_info.xml file
     $metadataInfoContent = @"
 <metadata>
   <installer>
     <selection architecture="$architecture" />
   </installer>
+  <drivers>
+    <location architecture="$architecture">sources\$architecture\drivers</location>
+  </drivers>
 </metadata>
 "@
     Set-Content -Path "$ScratchDisk\tiny11\sources\metadata_info.xml" -Value $metadataInfoContent
@@ -531,32 +566,24 @@ Name=Windows
 Version=11
 BuildID=$(Get-Date -Format "yyyyMMdd")
 Architecture=$architecture
+
+[Drivers]
+Repository=sources\$architecture\drivers
 "@
     Set-Content -Path "$ScratchDisk\tiny11\sources\product.ini" -Value $productIniContent
     
-    # Special handling for other potential driver-related folders
-    $driverRelatedFolders = @("inf", "pnputil", "sata")
-    foreach ($folder in $driverRelatedFolders) {
-        if (Test-Path -Path "$ScratchDisk\tiny11\sources\$folder") {
-            if (-not (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\$folder")) {
-                New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture\$folder" | Out-Null
-            }
-            Copy-Item -Path "$ScratchDisk\tiny11\sources\$folder\*" -Destination "$ScratchDisk\tiny11\sources\$architecture\$folder\" -Recurse -Force
-            Write-Output "$folder folder successfully copied to architecture-specific folder."
-        }
+    # ===== PHASE 5: Create driverindex.xml file =====
+    # This file helps the legacy installer find drivers
+    if (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\drivers") {
+        $driverIndexContent = @"
+<drivers>
+  <driver path="sources\$architecture\drivers" />
+</drivers>
+"@
+        Set-Content -Path "$ScratchDisk\tiny11\sources\$architecture\driverindex.xml" -Value $driverIndexContent
     }
     
-    # Also preserve any .inf and .cat files in the sources directory (often contain driver info)
-    $driverFiles = Get-ChildItem -Path "$ScratchDisk\tiny11\sources\" -Filter "*.inf" -File
-    foreach ($file in $driverFiles) {
-        Copy-Item -Path $file.FullName -Destination "$ScratchDisk\tiny11\sources\$architecture\" -Force
-    }
-    $catFiles = Get-ChildItem -Path "$ScratchDisk\tiny11\sources\" -Filter "*.cat" -File
-    foreach ($file in $catFiles) {
-        Copy-Item -Path $file.FullName -Destination "$ScratchDisk\tiny11\sources\$architecture\" -Force
-    }
-    
-    Write-Output "Legacy installer configuration completed with driver preservation."
+    Write-Output "Legacy installer configuration completed with comprehensive driver preservation."
 }
 
 Write-Output "Creating ISO image..."
