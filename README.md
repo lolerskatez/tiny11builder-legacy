@@ -18,7 +18,7 @@ This script generates a significantly reduced Windows 11 image. However, **it's 
 ---
 
 ## ⚠️ Script versions:
-- **tiny11maker.ps1** : The regular script, which removes a lot of bloat but keeps the system serviceable. You can add languages, updates, and features post-creation. This is the recommended script for regular use.
+- **tiny11maker.ps1** : The regular script, which removes a lot of bloat but keeps the system serviceable. You can add languages, updates, and features post-creation. This is the recommended script for regular use. **Now with both modern and legacy installer support!**
 - ⚠️ **tiny11coremaker.ps1** : The core script, which removes even more bloat but also removes the ability to service the image. You cannot add languages, updates, or features post-creation. This is recommended for quick testing or development use.
 
 ## Instructions:
@@ -35,12 +35,14 @@ Set-ExecutionPolicy Bypass -Scope Process
 ```powershell
 C:/path/to/your/tiny11/script.ps1 -ISO <letter> -SCRATCH <letter>
 ``` 
-> You can see of the script by running the `get-help` command.
+> For the legacy installer format, you can add the `-Legacy` parameter or select it interactively during the script execution.
+> You can see full details of the script by running the `get-help` command.
 
 6. Select the drive letter where the image is mounted (only the letter, no colon (:))
-7. Select the SKU that you want the image to be based.
-8. Sit back and relax :)
-9. When the image is completed, you will see it in the folder where the script was extracted, with the name tiny11.iso
+7. Select the SKU that you want the image to be based on.
+8. Choose between modern (Windows 11 style) or legacy (Windows 10 style) installer.
+9. Sit back and relax :)
+10. When the image is completed, you will see it in the folder where the script was extracted, with the name `tiny11.iso` (for modern installer) or `tiny11_legacy.iso` (for legacy installer)
 
 ---
 
@@ -97,6 +99,27 @@ You will be asked during image creation if you want to enable .net 3.5 support!
 
 ---
 
+## Installer Types:
+
+The script now supports two different installer formats:
+
+1. **Modern Installer (Windows 11 style)**
+   - Default option if not specified with parameters
+   - Uses the newer Windows 11 installation experience
+   - Creates `tiny11.iso`
+
+2. **Legacy Installer (Windows 10 style)**
+   - Can be specified using the `-Legacy` parameter or selected interactively
+   - Uses the classic Windows 10 installation experience
+   - May be preferred for compatibility with certain hardware or deployment scenarios
+   - Creates `tiny11_legacy.iso`
+
+You can select your preferred installer type either:
+- By adding the `-Legacy` parameter when running the script
+- Interactively during script execution after selecting the Windows image
+
+---
+
 ## Known issues:
 - Although Edge is removed, there are some remnants in the Settings, but the app in itself is deleted. 
 - You might have to update Winget before being able to install any apps, using Microsoft Store.
@@ -105,9 +128,15 @@ You will be asked during image creation if you want to enable .net 3.5 support!
 
 ---
 
+## New in this release:
+- **Legacy installer support**: Create ISOs with Windows 10-style installer format
+- **Interactive installer selection**: Choose between modern and legacy installer during script execution
+- **Automatic architecture detection**: Script properly handles different CPU architectures
+
 ## Features to be implemented:
 - ~~disabling telemetry~~ (Implemented in the 04-29-24 release!)
 - ~~more ad suppression~~ (Partially implemented in the 09-06-25 release!)
+- ~~legacy installer support~~ (Implemented in the 10-02-25 release!)
 - improved language and arch detection
 - more flexibility in what to keep and what to delete
 - maybe a GUI???
