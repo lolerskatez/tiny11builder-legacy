@@ -521,10 +521,71 @@ if ($global:UseLegacyInstaller) {
         }
     }
     
-    # ===== PHASE 2: Copy all driver files and maintain both original and architecture-specific locations =====
+    # ===== PHASE 2: Extract drivers directly from WIM file =====
     
-    # Process standard driver directories
+    Write-Output "Extracting drivers from Windows image for legacy installer..."
+    
+    # Create temporary directory for driver extraction
+    $driverExtractionDir = "$ScratchDisk\driver_extraction_temp"
+    if (-not (Test-Path -Path $driverExtractionDir)) {
+        New-Item -ItemType Directory -Force -Path $driverExtractionDir | Out-Null
+    }
+    
+    # Mount Windows image to extract drivers if we haven't already done so
+    $needToMountImage = $true
+    $mountedImagePath = "$ScratchDisk\driver_mount"
+    
+    if (-not (Test-Path -Path $mountedImagePath)) {
+        Write-Output "Creating temporary mount directory for driver extraction..."
+        New-Item -ItemType Directory -Force -Path $mountedImagePath | Out-Null
+        
+        Write-Output "Mounting Windows image temporarily to extract drivers..."
+        Mount-WindowsImage -ImagePath "$ScratchDisk\tiny11\sources\install.wim" -Index $index -Path $mountedImagePath | Out-Null
+    } else {
+        Write-Output "Using already mounted Windows image for driver extraction..."
+        $needToMountImage = $false
+    }
+    
+    # Copy driver-related folders from mounted image
+    $driverRelatedPaths = @(
+        "Windows\System32\DriverStore",
+        "Windows\System32\drivers",
+        "Windows\INF",
+        "Windows\System32\DRVSTORE"
+    )
+    
+    foreach ($path in $driverRelatedPaths) {
+        $sourcePath = "$mountedImagePath\$path"
+        if (Test-Path -Path $sourcePath) {
+            $destFolder = Split-Path -Path $path -Leaf
+            $destPath = "$driverExtractionDir\$destFolder"
+            
+            if (-not (Test-Path -Path $destPath)) {
+                New-Item -ItemType Directory -Force -Path $destPath | Out-Null
+            }
+            
+            Write-Output "Copying drivers from $path..."
+            Copy-Item -Path "$sourcePath\*" -Destination $destPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    
+    # If we mounted the image specifically for driver extraction, unmount it now
+    if ($needToMountImage) {
+        Write-Output "Unmounting temporary Windows image..."
+        Dismount-WindowsImage -Path $mountedImagePath -Discard | Out-Null
+        Remove-Item -Path $mountedImagePath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    
+    # Process extracted driver directories and copy to architecture-specific folders
     $driverSources = @(
+        @{Source = "$driverExtractionDir\DriverStore"; Dest = "$ScratchDisk\tiny11\sources\$architecture\DriverStore"},
+        @{Source = "$driverExtractionDir\drivers"; Dest = "$ScratchDisk\tiny11\sources\$architecture\drivers"},
+        @{Source = "$driverExtractionDir\INF"; Dest = "$ScratchDisk\tiny11\sources\$architecture\inf"},
+        @{Source = "$driverExtractionDir\DRVSTORE"; Dest = "$ScratchDisk\tiny11\sources\$architecture\drvstore"}
+    )
+    
+    # Also check if there are any standard driver directories in the ISO sources
+    $isoDriverSources = @(
         @{Source = "$ScratchDisk\tiny11\sources\drivers"; Dest = "$ScratchDisk\tiny11\sources\$architecture\drivers"},
         @{Source = "$ScratchDisk\tiny11\sources\DriverStore"; Dest = "$ScratchDisk\tiny11\sources\$architecture\DriverStore"},
         @{Source = "$ScratchDisk\tiny11\sources\inf"; Dest = "$ScratchDisk\tiny11\sources\$architecture\inf"},
@@ -533,14 +594,22 @@ if ($global:UseLegacyInstaller) {
         @{Source = "$ScratchDisk\tiny11\sources\FileRepository"; Dest = "$ScratchDisk\tiny11\sources\$architecture\FileRepository"}
     )
     
-    foreach ($dirPair in $driverSources) {
+    # Combine both source lists
+    $allDriverSources = $driverSources + $isoDriverSources
+    
+    # Copy all driver files from sources to destinations
+    foreach ($dirPair in $allDriverSources) {
         if (Test-Path -Path $dirPair.Source) {
             Write-Output "Copying from $($dirPair.Source) to $($dirPair.Dest)"
+            if (-not (Test-Path -Path $dirPair.Dest)) {
+                New-Item -ItemType Directory -Force -Path $dirPair.Dest | Out-Null
+            }
             Copy-Item -Path "$($dirPair.Source)\*" -Destination $dirPair.Dest -Recurse -Force -ErrorAction SilentlyContinue
-        } else {
-            Write-Output "Source directory not found: $($dirPair.Source)"
         }
     }
+    
+    # Clean up extraction directory
+    Remove-Item -Path $driverExtractionDir -Recurse -Force -ErrorAction SilentlyContinue
     
     # ===== PHASE 3: Special handling for driver files in sources directory =====
     $driverFileExtensions = @("*.inf", "*.cat", "*.sys", "*.dll", "*.ini")
@@ -555,10 +624,10 @@ if ($global:UseLegacyInstaller) {
         }
     }
     
-    # ===== PHASE 4: Create special driver index files for legacy installer =====
-    Write-Output "Creating driver index files for legacy installer..."
+    # ===== PHASE 4: Create enhanced driver index files for legacy installer =====
+    Write-Output "Creating comprehensive driver index files for legacy installer..."
     
-    # Create metadata files needed for legacy installer
+    # Create metadata files with multiple driver locations
     $metadataInfoContent = @"
 <metadata>
   <installer>
@@ -566,12 +635,17 @@ if ($global:UseLegacyInstaller) {
   </installer>
   <drivers>
     <location architecture="$architecture">sources\$architecture\drivers</location>
+    <location architecture="$architecture">sources\$architecture\storage</location>
+    <location architecture="$architecture">sources\$architecture\sata</location>
+    <location architecture="$architecture">sources\$architecture\DriverStore</location>
+    <location architecture="$architecture">sources\$architecture</location>
+    <location architecture="$architecture">sources\drivers</location>
   </drivers>
 </metadata>
 "@
     Set-Content -Path "$ScratchDisk\tiny11\sources\metadata_info.xml" -Value $metadataInfoContent
     
-    # Create product.ini file with appropriate settings
+    # Create product.ini file with multiple driver repositories
     $productIniContent = @"
 [Product]
 Name=Windows
@@ -580,9 +654,34 @@ BuildID=$(Get-Date -Format "yyyyMMdd")
 Architecture=$architecture
 
 [Drivers]
-Repository=sources\$architecture\drivers
+Repository=sources\$architecture\drivers;sources\$architecture\storage;sources\$architecture\sata;sources\$architecture\DriverStore;sources\$architecture;sources\drivers
 "@
     Set-Content -Path "$ScratchDisk\tiny11\sources\product.ini" -Value $productIniContent
+    
+    # Create txtsetup.sif file for legacy compatibility
+    $txtsetupContent = @"
+[SourceDisksFiles]
+; Format: filename_on_source = diskid,subdir,size,flags,filetime
+; All storage drivers will be available during text-mode setup
+
+[HardwareIdsDatabase]
+; Add generic entries for common storage controllers
+PCI\CC_0101 = "IDE Controller"
+PCI\CC_0104 = "RAID Controller"
+PCI\CC_0106 = "SATA Controller"
+PCI\CC_0107 = "SAS Controller"
+PCI\CC_0108 = "NVMe Controller"
+
+[SCSI.Load]
+; Load all storage drivers by default
+
+[SCSI]
+; Storage controller entries
+"@
+    Set-Content -Path "$ScratchDisk\tiny11\sources\$architecture\txtsetup.sif" -Value $txtsetupContent
+    
+    # Also place a copy in the root sources directory for maximum compatibility
+    Set-Content -Path "$ScratchDisk\tiny11\sources\txtsetup.sif" -Value $txtsetupContent
     
     # ===== PHASE 5: Create driverindex.xml file and additional driver configuration =====
     # This file helps the legacy installer find drivers
@@ -599,62 +698,194 @@ Repository=sources\$architecture\drivers
         Set-Content -Path "$ScratchDisk\tiny11\sources\driverindex.xml" -Value $driverIndexContent
     }
     
-    # ===== PHASE 6: Special handling for common storage drivers =====
-    # Create a dedicated storage drivers directory
-    $storageDriverDir = "$ScratchDisk\tiny11\sources\$architecture\storage"
-    if (-not (Test-Path -Path $storageDriverDir)) {
-        New-Item -ItemType Directory -Force -Path $storageDriverDir | Out-Null
+    # ===== PHASE 6: Enhanced special handling for storage drivers =====
+    # Create dedicated storage drivers directories
+    $storageDriverDirs = @(
+        "$ScratchDisk\tiny11\sources\$architecture\storage",
+        "$ScratchDisk\tiny11\sources\$architecture\drivers\storage",
+        "$ScratchDisk\tiny11\sources\$architecture\sata"
+    )
+    
+    foreach ($dir in $storageDriverDirs) {
+        if (-not (Test-Path -Path $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
     }
     
-    # Search for common storage drivers and copy them to the storage directory
-    $storageDriverPatterns = @("*stor*.inf", "*sata*.inf", "*nvme*.inf", "*disk*.inf", "*scsi*.inf", "*hdc*.inf", "*ahci*.inf")
+    # Define storage driver patterns
+    $storageDriverPatterns = @(
+        "*stor*.inf", 
+        "*sata*.inf", 
+        "*nvme*.inf", 
+        "*disk*.inf", 
+        "*scsi*.inf", 
+        "*hdc*.inf", 
+        "*ahci*.inf",
+        "*pci*.inf",
+        "*ide*.inf",
+        "*iastor*.inf",
+        "*vmd*.inf",
+        "*iaahci*.inf",
+        "*lsi*.inf",
+        "*percsas*.inf",
+        "*megasas*.inf"
+    )
+    
+    # Look in all potential driver locations including the extracted drivers
+    $potentialLocations = @(
+        "$driverExtractionDir\DriverStore",
+        "$driverExtractionDir\drivers",
+        "$driverExtractionDir\INF",
+        "$driverExtractionDir\DRVSTORE",
+        "$ScratchDisk\tiny11\sources\$architecture\DriverStore",
+        "$ScratchDisk\tiny11\sources\$architecture\drivers",
+        "$ScratchDisk\tiny11\sources\$architecture\inf",
+        "$ScratchDisk\tiny11\sources\drivers",
+        "$ScratchDisk\tiny11\sources\DriverStore",
+        "$ScratchDisk\tiny11\sources\inf",
+        "$ScratchDisk\tiny11\sources"
+    )
+    
+    $storageDriverCount = 0
+    
+    Write-Output "Searching for storage drivers..."
     foreach ($pattern in $storageDriverPatterns) {
-        # Look in all potential driver locations
-        $potentialLocations = @(
-            "$ScratchDisk\tiny11\sources\drivers",
-            "$ScratchDisk\tiny11\sources\DriverStore",
-            "$ScratchDisk\tiny11\sources\inf",
-            "$ScratchDisk\tiny11\sources"
-        )
-        
         foreach ($location in $potentialLocations) {
             if (Test-Path -Path $location) {
+                # Find all files matching this pattern recursively
                 $files = Get-ChildItem -Path $location -Recurse -Filter $pattern -File -ErrorAction SilentlyContinue
                 if ($files) {
                     foreach ($file in $files) {
-                        # Copy the driver file to the storage directory
-                        Copy-Item -Path $file.FullName -Destination $storageDriverDir -Force -ErrorAction SilentlyContinue
-                        # Also copy any related .cat, .sys files
-                        $relatedFiles = Get-ChildItem -Path $file.DirectoryName -Filter "$($file.BaseName)*.*" -File -ErrorAction SilentlyContinue
-                        foreach ($relatedFile in $relatedFiles) {
-                            Copy-Item -Path $relatedFile.FullName -Destination $storageDriverDir -Force -ErrorAction SilentlyContinue
+                        # Copy the driver file to all storage directories for redundancy
+                        foreach ($destDir in $storageDriverDirs) {
+                            Copy-Item -Path $file.FullName -Destination $destDir -Force -ErrorAction SilentlyContinue
                         }
+                        
+                        # Also copy to root of architecture-specific folder for maximum compatibility
+                        Copy-Item -Path $file.FullName -Destination "$ScratchDisk\tiny11\sources\$architecture\" -Force -ErrorAction SilentlyContinue
+                        
+                        # Find and copy all related files (.cat, .sys, .dll, etc.)
+                        $driverBaseName = $file.BaseName
+                        $relatedFiles = Get-ChildItem -Path $file.DirectoryName -Filter "$driverBaseName*.*" -File -ErrorAction SilentlyContinue
+                        foreach ($relatedFile in $relatedFiles) {
+                            # Copy to all storage directories
+                            foreach ($destDir in $storageDriverDirs) {
+                                Copy-Item -Path $relatedFile.FullName -Destination $destDir -Force -ErrorAction SilentlyContinue
+                            }
+                            # And to root of architecture-specific folder
+                            Copy-Item -Path $relatedFile.FullName -Destination "$ScratchDisk\tiny11\sources\$architecture\" -Force -ErrorAction SilentlyContinue
+                        }
+                        
+                        $storageDriverCount++
                     }
                 }
             }
         }
     }
     
-    # ===== PHASE 7: Verify driver preservation =====
+    Write-Output "Found and copied $storageDriverCount storage drivers to multiple locations for redundancy"
+    
+    # ===== PHASE 7: Enhanced verification of driver preservation =====
     $driverCount = 0
     $driverLocations = @(
         "$ScratchDisk\tiny11\sources\$architecture\drivers", 
         "$ScratchDisk\tiny11\sources\$architecture\DriverStore",
-        "$ScratchDisk\tiny11\sources\$architecture\storage"
+        "$ScratchDisk\tiny11\sources\$architecture\storage",
+        "$ScratchDisk\tiny11\sources\$architecture\sata",
+        "$ScratchDisk\tiny11\sources\$architecture\inf",
+        "$ScratchDisk\tiny11\sources\$architecture"
     )
     
+    Write-Output "Performing comprehensive driver verification..."
     foreach ($location in $driverLocations) {
         if (Test-Path -Path $location) {
             $filesCount = (Get-ChildItem -Path $location -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
             $driverCount += $filesCount
             Write-Output "Found $filesCount files in $location"
+            
+            # Check specifically for critical driver types
+            $infCount = (Get-ChildItem -Path $location -Recurse -Filter "*.inf" -File -ErrorAction SilentlyContinue | Measure-Object).Count
+            $sysCount = (Get-ChildItem -Path $location -Recurse -Filter "*.sys" -File -ErrorAction SilentlyContinue | Measure-Object).Count
+            $catCount = (Get-ChildItem -Path $location -Recurse -Filter "*.cat" -File -ErrorAction SilentlyContinue | Measure-Object).Count
+            
+            if ($infCount -gt 0 -or $sysCount -gt 0 -or $catCount -gt 0) {
+                Write-Output "  - Contains: $infCount .inf files, $sysCount .sys files, $catCount .cat files"
+            }
+            
+            # Check for storage driver keywords in .inf files
+            $storageDriversFound = $false
+            $storageKeywords = @("sata", "storage", "disk", "nvme", "ahci", "scsi", "raid")
+            $infFiles = Get-ChildItem -Path $location -Recurse -Filter "*.inf" -File -ErrorAction SilentlyContinue
+            
+            foreach ($infFile in $infFiles) {
+                $content = Get-Content -Path $infFile.FullName -ErrorAction SilentlyContinue
+                foreach ($keyword in $storageKeywords) {
+                    if ($content -match $keyword) {
+                        Write-Output "  - Found storage driver: $($infFile.Name) contains '$keyword'"
+                        $storageDriversFound = $true
+                        break
+                    }
+                }
+                if ($storageDriversFound) { break }
+            }
         }
     }
     
     if ($driverCount -gt 0) {
         Write-Output "Driver preservation verified: $driverCount total driver files preserved for legacy installer."
+        
+        # Create a simple driver verification file to help with debugging
+        $verificationContent = @"
+Driver Verification
+------------------
+Total driver files: $driverCount
+Generated: $(Get-Date)
+Architecture: $architecture
+"@
+        Set-Content -Path "$ScratchDisk\tiny11\sources\$architecture\driver_verification.txt" -Value $verificationContent
     } else {
-        Write-Output "WARNING: No driver files found in the architecture-specific folders. This may cause driver issues during installation."
+        Write-Output "WARNING: No driver files found in the architecture-specific folders. Attempting emergency driver extraction..."
+        
+        # Emergency driver extraction
+        Write-Output "Performing emergency copy of ALL .inf, .cat, and .sys files from install.wim..."
+        
+        # Create a temporary emergency extraction directory
+        $emergencyExtractDir = "$ScratchDisk\emergency_drivers"
+        if (-not (Test-Path -Path $emergencyExtractDir)) {
+            New-Item -ItemType Directory -Force -Path $emergencyExtractDir | Out-Null
+        }
+        
+        # Check if Windows is still mounted, if not, mount it again
+        $emergencyMountPath = "$ScratchDisk\emergency_mount"
+        if (-not (Test-Path -Path $mountedImagePath) -or (Get-ChildItem -Path $mountedImagePath -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0) {
+            Write-Output "Mounting Windows image for emergency driver extraction..."
+            New-Item -ItemType Directory -Force -Path $emergencyMountPath | Out-Null
+            Mount-WindowsImage -ImagePath "$ScratchDisk\tiny11\sources\install.wim" -Index $index -Path $emergencyMountPath | Out-Null
+            
+            # Extract all drivers from Windows directory
+            Write-Output "Extracting all driver files from Windows directory..."
+            $driverFiles = Get-ChildItem -Path "$emergencyMountPath\Windows" -Recurse -Include "*.inf", "*.cat", "*.sys" -File -ErrorAction SilentlyContinue
+            
+            if ($driverFiles.Count -gt 0) {
+                foreach ($file in $driverFiles) {
+                    # Copy to emergency driver directory
+                    Copy-Item -Path $file.FullName -Destination $emergencyExtractDir -Force -ErrorAction SilentlyContinue
+                }
+                
+                # Copy all extracted drivers to architecture-specific folder
+                if (-not (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\drivers")) {
+                    New-Item -ItemType Directory -Force -Path "$ScratchDisk\tiny11\sources\$architecture\drivers" | Out-Null
+                }
+                
+                Copy-Item -Path "$emergencyExtractDir\*" -Destination "$ScratchDisk\tiny11\sources\$architecture\drivers" -Force -ErrorAction SilentlyContinue
+                Write-Output "Emergency driver extraction complete: $($driverFiles.Count) files extracted"
+            }
+            
+            # Clean up
+            Dismount-WindowsImage -Path $emergencyMountPath -Discard | Out-Null
+            Remove-Item -Path $emergencyMountPath -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $emergencyExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
     
     Write-Output "Legacy installer configuration completed with comprehensive driver preservation."
