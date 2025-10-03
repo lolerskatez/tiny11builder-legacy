@@ -114,8 +114,13 @@ Start-Transcript -Path "$PSScriptRoot\tiny11_$(get-date -f yyyyMMdd_HHmms).log"
 
 $Host.UI.RawUI.WindowTitle = "Tiny11 image creator"
 Clear-Host
+
+# Create a global variable for installer type that will be accessed throughout the script
+$global:UseLegacyInstaller = $Legacy.IsPresent
+Write-Output "Initial legacy installer setting: $global:UseLegacyInstaller"
+
 Write-Output "Welcome to the tiny11 image creator! Release: 09-07-25"
-if ($Legacy.IsPresent) {
+if ($global:UseLegacyInstaller) {
     Write-Output "LEGACY INSTALLER MODE ENABLED: Creating ISO with legacy installer format"
 } else {
     Write-Output "You will be able to choose between modern and legacy installer formats after selecting Windows version"
@@ -178,13 +183,19 @@ if (-not $Legacy.IsPresent) {
             Write-Output "Invalid selection. Please enter 1 or 2."
         }
     }
-    $UseLegacyInstaller = ($installerSelection -eq "2")
+    $global:UseLegacyInstaller = ($installerSelection -eq "2")
     
-    if ($UseLegacyInstaller) {
+    Write-Output "Installer type selection made: Legacy = $global:UseLegacyInstaller"
+    
+    if ($global:UseLegacyInstaller) {
         Write-Output "`nLegacy installer selected. Will create ISO with Windows 10-style installer.`n"
     } else {
         Write-Output "`nNew installer selected. Will create ISO with Windows 11 modern installer.`n"
     }
+} else {
+    # If -Legacy parameter was provided, make sure we explicitly confirm this
+    Write-Output "`nLegacy installer will be used (set via command line parameter).`n"
+    $global:UseLegacyInstaller = $true
 }
 
 Write-Output "Mounting Windows image. This may take a while."
@@ -476,7 +487,8 @@ Write-Output "Copying unattended file for bypassing MS account on OOBE..."
 Copy-Item -Path "$PSScriptRoot\autounattend.xml" -Destination "$ScratchDisk\tiny11\autounattend.xml" -Force | Out-Null
 
 # Handle legacy installer configuration if selected
-if ($UseLegacyInstaller) {
+Write-Output "Legacy installer setting before configuration: $global:UseLegacyInstaller"
+if ($global:UseLegacyInstaller) {
     Write-Output "Setting up legacy installer configuration..."
     
     # Create legacy installer directories and files if they don't exist
@@ -572,15 +584,77 @@ Repository=sources\$architecture\drivers
 "@
     Set-Content -Path "$ScratchDisk\tiny11\sources\product.ini" -Value $productIniContent
     
-    # ===== PHASE 5: Create driverindex.xml file =====
+    # ===== PHASE 5: Create driverindex.xml file and additional driver configuration =====
     # This file helps the legacy installer find drivers
     if (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\drivers") {
         $driverIndexContent = @"
 <drivers>
   <driver path="sources\$architecture\drivers" />
+  <driver path="sources\drivers" />
 </drivers>
 "@
         Set-Content -Path "$ScratchDisk\tiny11\sources\$architecture\driverindex.xml" -Value $driverIndexContent
+        
+        # Also create in the main sources directory for redundancy
+        Set-Content -Path "$ScratchDisk\tiny11\sources\driverindex.xml" -Value $driverIndexContent
+    }
+    
+    # ===== PHASE 6: Special handling for common storage drivers =====
+    # Create a dedicated storage drivers directory
+    $storageDriverDir = "$ScratchDisk\tiny11\sources\$architecture\storage"
+    if (-not (Test-Path -Path $storageDriverDir)) {
+        New-Item -ItemType Directory -Force -Path $storageDriverDir | Out-Null
+    }
+    
+    # Search for common storage drivers and copy them to the storage directory
+    $storageDriverPatterns = @("*stor*.inf", "*sata*.inf", "*nvme*.inf", "*disk*.inf", "*scsi*.inf", "*hdc*.inf", "*ahci*.inf")
+    foreach ($pattern in $storageDriverPatterns) {
+        # Look in all potential driver locations
+        $potentialLocations = @(
+            "$ScratchDisk\tiny11\sources\drivers",
+            "$ScratchDisk\tiny11\sources\DriverStore",
+            "$ScratchDisk\tiny11\sources\inf",
+            "$ScratchDisk\tiny11\sources"
+        )
+        
+        foreach ($location in $potentialLocations) {
+            if (Test-Path -Path $location) {
+                $files = Get-ChildItem -Path $location -Recurse -Filter $pattern -File -ErrorAction SilentlyContinue
+                if ($files) {
+                    foreach ($file in $files) {
+                        # Copy the driver file to the storage directory
+                        Copy-Item -Path $file.FullName -Destination $storageDriverDir -Force -ErrorAction SilentlyContinue
+                        # Also copy any related .cat, .sys files
+                        $relatedFiles = Get-ChildItem -Path $file.DirectoryName -Filter "$($file.BaseName)*.*" -File -ErrorAction SilentlyContinue
+                        foreach ($relatedFile in $relatedFiles) {
+                            Copy-Item -Path $relatedFile.FullName -Destination $storageDriverDir -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    # ===== PHASE 7: Verify driver preservation =====
+    $driverCount = 0
+    $driverLocations = @(
+        "$ScratchDisk\tiny11\sources\$architecture\drivers", 
+        "$ScratchDisk\tiny11\sources\$architecture\DriverStore",
+        "$ScratchDisk\tiny11\sources\$architecture\storage"
+    )
+    
+    foreach ($location in $driverLocations) {
+        if (Test-Path -Path $location) {
+            $filesCount = (Get-ChildItem -Path $location -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+            $driverCount += $filesCount
+            Write-Output "Found $filesCount files in $location"
+        }
+    }
+    
+    if ($driverCount -gt 0) {
+        Write-Output "Driver preservation verified: $driverCount total driver files preserved for legacy installer."
+    } else {
+        Write-Output "WARNING: No driver files found in the architecture-specific folders. This may cause driver issues during installation."
     }
     
     Write-Output "Legacy installer configuration completed with comprehensive driver preservation."
@@ -614,14 +688,56 @@ if ([System.IO.Directory]::Exists($ADKDepTools)) {
     $OSCDIMG = $localOSCDIMGPath
 }
 
+# Diagnostic information about installer type
+Write-Output "`n==== INSTALLER TYPE DIAGNOSTICS ===="
+Write-Output "UseLegacyInstaller value: $global:UseLegacyInstaller"
+Write-Output "Legacy parameter present: $($Legacy.IsPresent)"
+Write-Output "====================================`n"
+
 # Set appropriate ISO filename based on installer type
-$isoFileName = if ($UseLegacyInstaller) { "tiny11_legacy.iso" } else { "tiny11.iso" }
+$isoFileName = if ($global:UseLegacyInstaller) { "tiny11_legacy.iso" } else { "tiny11.iso" }
+
+# Double check that legacy setup is properly applied
+if ($global:UseLegacyInstaller) {
+    if (Test-Path -Path "$ScratchDisk\tiny11\sources\$architecture\install.wim") {
+        Write-Output "VERIFICATION: Legacy installer setup confirmed - install.wim found in architecture-specific folder"
+    } else {
+        Write-Output "WARNING: Legacy installer was selected but install.wim was not found in architecture-specific folder"
+        Write-Output "This may indicate the legacy installer setup was not applied correctly"
+    }
+    
+    # Verify that driver files exist in the appropriate locations
+    $legacyDriversExist = $false
+    $driverCheckLocations = @(
+        "$ScratchDisk\tiny11\sources\$architecture\drivers",
+        "$ScratchDisk\tiny11\sources\$architecture\storage",
+        "$ScratchDisk\tiny11\sources\$architecture\DriverStore"
+    )
+    
+    foreach ($location in $driverCheckLocations) {
+        if (Test-Path -Path $location) {
+            $filesCount = (Get-ChildItem -Path $location -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+            if ($filesCount -gt 0) {
+                $legacyDriversExist = $true
+                Write-Output "VERIFICATION: Found $filesCount driver files in $location"
+            }
+        }
+    }
+    
+    if (-not $legacyDriversExist) {
+        Write-Output "WARNING: No driver files found in legacy installer architecture-specific folders"
+        Write-Output "This may cause driver-related issues during installation"
+    } else {
+        Write-Output "VERIFICATION: Driver files successfully copied to legacy installer locations"
+    }
+}
 
 & "$OSCDIMG" '-m' '-o' '-u2' '-udfver102' "-bootdata:2#p0,e,b$ScratchDisk\tiny11\boot\etfsboot.com#pEF,e,b$ScratchDisk\tiny11\efi\microsoft\boot\efisys.bin" "$ScratchDisk\tiny11" "$PSScriptRoot\$isoFileName"
 
 # Finishing up
 Write-Output "Creation completed! Press any key to exit the script..."
-if ($UseLegacyInstaller) {
+Write-Output "Final legacy installer setting: $global:UseLegacyInstaller"
+if ($global:UseLegacyInstaller) {
     Write-Output "Legacy ISO created as tiny11_legacy.iso"
 } else {
     Write-Output "Standard ISO created as tiny11.iso"
